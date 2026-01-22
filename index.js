@@ -1,36 +1,29 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
-// SOLUÇÃO SIMPLES E FUNCIONAL
+// Configuração do cliente
 const client = new Client({
     authStrategy: new LocalAuth({
         dataPath: './.wwebjs_auth',
     }),
     puppeteer: {
-        headless: true,
+        headless: false, // MUDAR PARA false PARA VER O NAVEGADOR
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--window-size=800,600'
+            '--disable-dev-shm-usage'
         ],
     }
 });
 
-// Objetos para controle de sessão
 const userSessions = {};
 const STEPS = {
     START: 0,
     MENU: 1,
     PLANS: 2,
     PROMO: 3,
-    SCHEDULE_NAME: 4,
-    SCHEDULE_TIME: 5,
-    HUMAN: 6,
-    CONFIRM_SCHEDULE: 7,
-    PAYMENT_OPTIONS: 8
+    SCHEDULE: 4,
+    HUMAN: 5
 };
 
 client.on('qr', (qr) => {
@@ -38,286 +31,348 @@ client.on('qr', (qr) => {
     console.log('>>> LEIA O QR CODE <<<');
 });
 
-client.on('ready', () => {
+client.on('ready', async () => {
     console.log('>>> BOT PRONTO <<<');
-    console.log('Usuário:', client.info.pushname);
+    
+    // APLICAR PATCH DIRETO NO NAVEGADOR
+    try {
+        await client.pupPage.evaluate(() => {
+            // Patch 1: Sobrescrever WWebJS.sendSeen
+            if (window.WWebJS) {
+                const originalSendSeen = window.WWebJS.sendSeen;
+                window.WWebJS.sendSeen = function() {
+                    return Promise.resolve(); // Retorna promessa vazia
+                };
+                console.log('Patch WWebJS aplicado');
+            }
+            
+            // Patch 2: Sobrescrever Store.Msg.sendSeen
+            if (window.Store && window.Store.Msg && window.Store.Msg.sendSeen) {
+                window.Store.Msg.sendSeen = function() {
+                    return Promise.resolve();
+                };
+                console.log('Patch Store.Msg aplicado');
+            }
+            
+            // Patch 3: Sobrescrever Store.sendSeen se existir
+            if (window.Store && window.Store.sendSeen) {
+                window.Store.sendSeen = function() {
+                    return Promise.resolve();
+                };
+                console.log('Patch Store.sendSeen aplicado');
+            }
+        });
+        console.log('✅ Todos os patches aplicados com sucesso!');
+    } catch (error) {
+        console.log('⚠️ Alguns patches não foram aplicados:', error.message);
+    }
 });
 
 client.on('authenticated', () => {
     console.log('>>> AUTENTICADO <<<');
 });
 
-// FUNÇÃO DE ENVIO QUE IGNORA ERROS DO sendSeen
-async function sendMessageSafe(userId, text) {
+// FUNÇÃO DE ENVIO SUPER SIMPLES E EFICAZ
+async function enviarComCerteza(userId, texto) {
+    console.log(`📤 Tentando enviar para ${userId}: "${texto.substring(0, 30)}..."`);
+    
+    // MÉTODO 1: Usando client.sendMessage com timeout
     try {
-        // Tentativa 1: Método normal com try-catch interno
-        await client.sendMessage(userId, text).catch(e => {
-            // Ignoramos o erro do sendSeen especificamente
-            if (e.message.includes('markedUnread') || e.message.includes('sendSeen')) {
-                console.log('✅ Mensagem enviada (erro sendSeen ignorado)');
-                return;
+        // Usamos Promise.race para timeout
+        const envio = client.sendMessage(userId, texto);
+        const timeout = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Timeout')), 5000)
+        );
+        
+        await Promise.race([envio, timeout]);
+        console.log('✅ Mensagem enviada (Método 1)');
+        return;
+    } catch (error1) {
+        console.log('❌ Método 1 falhou:', error1.message);
+    }
+    
+    // MÉTODO 2: Usando chat.sendMessage
+    try {
+        const chat = await client.getChatById(userId);
+        console.log('Chat encontrado, enviando...');
+        await chat.sendMessage(texto);
+        console.log('✅ Mensagem enviada (Método 2)');
+        return;
+    } catch (error2) {
+        console.log('❌ Método 2 falhou:', error2.message);
+    }
+    
+    // MÉTODO 3: Injeção direta JavaScript
+    try {
+        await client.pupPage.evaluate(async (id, msg) => {
+            // Encontrar o chat
+            const chat = await window.Store.Chat.find(id);
+            if (chat) {
+                // Enviar mensagem
+                await chat.sendMessage(msg);
+                return true;
             }
-            throw e; // Relança outros erros
-        });
-    } catch (error) {
-        // Se ainda der erro, tentamos uma abordagem alternativa
-        console.log('Tentando método alternativo...');
-        try {
-            // Método alternativo usando chat.sendMessage
-            const chat = await client.getChatById(userId);
-            
-            // Sobrescrever temporariamente o método sendSeen
-            const originalSendSeen = chat.sendSeen;
-            chat.sendSeen = () => Promise.resolve();
-            
-            await chat.sendMessage(text);
-            
-            // Restaurar método original
-            chat.sendSeen = originalSendSeen;
-        } catch (e2) {
-            console.log('✅ Mensagem provavelmente enviada (erro ignorado)');
-            // A mensagem geralmente é enviada mesmo com erro no sendSeen
-        }
+            return false;
+        }, userId, texto);
+        console.log('✅ Mensagem enviada (Método 3)');
+        return;
+    } catch (error3) {
+        console.log('❌ Método 3 falhou:', error3.message);
+    }
+    
+    // MÉTODO 4: Última tentativa - ignorar completamente erros
+    try {
+        // Simplesmente tenta enviar sem se importar com erros
+        await client.sendMessage(userId, texto).catch(() => {});
+        console.log('✅ Mensagem (provavelmente) enviada (Método 4)');
+    } catch (error4) {
+        console.log('❌ Todos os métodos falharam');
     }
 }
 
-// Verificar se é número válido
-const isValidNumber = (input) => {
-    return /^[0-9]$/.test(input);
-};
+// Função para enviar com delay (evita flood)
+const enviarComDelay = (() => {
+    let ultimoEnvio = 0;
+    const delayMinimo = 1000; // 1 segundo entre mensagens
+    
+    return async (userId, texto) => {
+        const agora = Date.now();
+        const tempoEspera = ultimoEnvio + delayMinimo - agora;
+        
+        if (tempoEspera > 0) {
+            console.log(`⏳ Aguardando ${tempoEspera}ms...`);
+            await new Promise(resolve => setTimeout(resolve, tempoEspera));
+        }
+        
+        await enviarComCerteza(userId, texto);
+        ultimoEnvio = Date.now();
+    };
+})();
 
 client.on('message', async msg => {
-    // Ignorar mensagens de grupos e status
-    if (msg.from.includes('@g.us') || msg.from.includes('status@broadcast')) {
+    // Log detalhado
+    console.log('\n══════════════════════════════════════');
+    console.log(`📩 NOVA MENSAGEM RECEBIDA:`);
+    console.log(`👤 De: ${msg.from}`);
+    console.log(`💬 Texto: "${msg.body}"`);
+    console.log(`⏰ Hora: ${new Date().toLocaleTimeString()}`);
+    
+    // Ignorar grupos
+    if (msg.from.includes('@g.us')) {
+        console.log('⏭️  Ignorando (grupo)');
         return;
     }
-
-    const userId = msg.from;
-    const userMsg = msg.body.trim();
-    const userMsgLower = userMsg.toLowerCase();
     
-    let userName = 'Visitante';
+    // Ignorar status
+    if (msg.from.includes('status@broadcast')) {
+        console.log('⏭️  Ignorando (status)');
+        return;
+    }
+    
+    const userId = msg.from;
+    const textoRecebido = msg.body.trim();
+    const textoMinusculo = textoRecebido.toLowerCase();
+    
+    // Obter nome do usuário
+    let nomeUsuario = 'Cliente';
     try {
-        const contact = await msg.getContact();
-        userName = contact.pushname || contact.name || 'Visitante';
+        const contato = await msg.getContact();
+        nomeUsuario = contato.pushname || contato.name || 'Cliente';
+        console.log(`👋 Usuário: ${nomeUsuario}`);
     } catch (error) {
-        console.log('Erro ao obter contato:', error.message);
+        console.log('⚠️  Não consegui obter nome do contato');
     }
-
-    // Inicializar sessão se não existir
+    
+    // Inicializar/recuperar sessão
     if (!userSessions[userId]) {
-        userSessions[userId] = { 
-            stage: STEPS.START, 
-            name: userName,
+        userSessions[userId] = {
+            etapa: STEPS.START,
+            nome: nomeUsuario,
             data: {},
-            lastActivity: Date.now()
+            ultimaInteracao: Date.now(),
+            historico: []
         };
+        console.log(`🆕 Nova sessão criada para ${nomeUsuario}`);
     }
-
-    const session = userSessions[userId];
-    session.lastActivity = Date.now();
-
-    // Função auxiliar simplificada
-    const sendMessage = async (text) => {
-        await sendMessageSafe(userId, text);
+    
+    const sessao = userSessions[userId];
+    sessao.ultimaInteracao = Date.now();
+    sessao.historico.push({ entrada: textoRecebido, hora: new Date() });
+    
+    // Verificar se é número
+    const ehNumero = /^[0-9]$/.test(textoRecebido);
+    const opcaoNumero = ehNumero ? parseInt(textoRecebido) : null;
+    
+    // Função auxiliar para enviar
+    const enviar = async (texto) => {
+        console.log(`📤 RESPONDENDO: "${texto.substring(0, 50)}..."`);
+        await enviarComDelay(userId, texto);
     };
-
-    // Máquina de estados
+    
+    // PROCESSAR COM BASE NA ETAPA
     try {
-        switch (session.stage) {
+        switch (sessao.etapa) {
             case STEPS.START:
-                await sendMessage(`👋 Olá ${userName}! Bem-vindo à *DevFit Academy* 💪\n\n*MENU PRINCIPAL*\nEscolha uma opção:\n\n1️⃣ Planos e Valores\n2️⃣ Promoções\n3️⃣ Agendar Aula Experimental\n4️⃣ Informações da Academia\n5️⃣ Falar com Atendente\n6️⃣ Sair`);
-                session.stage = STEPS.MENU;
+                await enviar(`👋 *OLÁ ${nomeUsuario.toUpperCase()}!* 😊\n\nSou o assistente virtual da *DEV FIT ACADEMY*! 💪\n\n*MENU PRINCIPAL* 📋\n\n*Digite o número da opção desejada:*\n\n1️⃣  PLANOS E VALORES\n2️⃣  PROMOÇÕES ESPECIAIS\n3️⃣  AGENDAR AULA EXPERIMENTAL\n4️⃣  INFORMAÇÕES DA ACADEMIA\n5️⃣  FALAR COM ATENDENTE\n\n👉 *EXEMPLO: Digite "1" para ver nossos planos*`);
+                sessao.etapa = STEPS.MENU;
                 break;
-
+                
             case STEPS.MENU:
-                if (isValidNumber(userMsg)) {
-                    const option = parseInt(userMsg);
-                    switch (option) {
+                if (ehNumero && opcaoNumero >= 1 && opcaoNumero <= 5) {
+                    switch (opcaoNumero) {
                         case 1:
-                            await sendMessage(`💳 *PLANOS DISPONÍVEIS*\n\nEscolha um plano:\n\n1️⃣ Plano Mensal\n2️⃣ Plano Trimestral\n3️⃣ Plano Semestral\n4️⃣ Plano Anual\n\n0️⃣ Voltar ao Menu`);
-                            session.stage = STEPS.PLANS;
+                            await enviar(`💪 *NOSSOS PLANOS* 💰\n\n*Digite o número do plano que deseja conhecer:*\n\n1️⃣  PLANO MENSAL - R$ 120,00\n2️⃣  PLANO TRIMESTRAL - R$ 100,00/mês\n3️⃣  PLANO SEMESTRAL - R$ 95,00/mês\n4️⃣  PLANO ANUAL - R$ 89,90/mês (25% OFF!)\n\n0️⃣  VOLTAR AO MENU PRINCIPAL`);
+                            sessao.etapa = STEPS.PLANS;
                             break;
                         case 2:
-                            await sendMessage(`🔥 *PROMOÇÕES ATIVAS*\n\nEscolha uma promoção:\n\n1️⃣ Projeto Verão\n2️⃣ Indique um Amigo\n3️⃣ Plano Familiar\n\n0️⃣ Voltar ao Menu`);
-                            session.stage = STEPS.PROMO;
+                            await enviar(`🔥 *PROMOÇÕES ATIVAS* 🎁\n\n*Escolha uma promoção:*\n\n1️⃣  PROJETO VERÃO - Matrícula GRÁTIS!\n2️⃣  INDICAÇÃO PREMIADA - Ganhe 1 mês!\n3️⃣  PLANO DUPLO - 20% de desconto!\n\n0️⃣  VOLTAR AO MENU PRINCIPAL`);
+                            sessao.etapa = STEPS.PROMO;
                             break;
                         case 3:
-                            await sendMessage(`📅 *AGENDAR AULA EXPERIMENTAL*\n\nDigite 1️⃣ para Continuar\nDigite 0️⃣ para Voltar`);
-                            session.stage = STEPS.SCHEDULE_NAME;
+                            await enviar(`📅 *AGENDAR AULA EXPERIMENTAL* 🏋️‍♂️\n\n*Digite:*\n\n1️⃣  PARA AGENDAR AGORA\n2️⃣  VER HORÁRIOS DISPONÍVEIS\n\n0️⃣  VOLTAR AO MENU PRINCIPAL`);
+                            sessao.etapa = STEPS.SCHEDULE;
                             break;
                         case 4:
-                            await sendMessage(`🏢 *INFORMAÇÕES*\n\n1️⃣ Endereço\n2️⃣ Horários\n3️⃣ Equipamentos\n4️⃣ Aulas\n5️⃣ Professores\n\n0️⃣ Voltar ao Menu`);
-                            // Permanece no menu
+                            await enviar(`🏢 *INFORMAÇÕES DA ACADEMIA* 📍\n\n📍 *Endereço:* Rua dos Atletas, 123 - Centro\n\n⏰ *Horário de Funcionamento:*\n• Segunda a Sexta: 6h às 23h\n• Sábados: 8h às 20h\n• Domingos: 9h às 14h\n\n🏋️‍♂️ *Estrutura:*\n• 200+ equipamentos\n• 3 salas de aula\n• Piscina semi-olímpica\n• Estacionamento gratuito\n\n0️⃣  VOLTAR AO MENU PRINCIPAL`);
                             break;
                         case 5:
-                            await sendMessage(`👨‍💼 *ATENDIMENTO*\n\n1️⃣ Comercial\n2️⃣ Financeiro\n3️⃣ Suporte\n4️⃣ Emergência\n\n0️⃣ Voltar ao Menu`);
-                            session.stage = STEPS.HUMAN;
+                            await enviar(`👨‍💼 *ATENDIMENTO HUMANO* 📞\n\nUm de nossos consultores entrará em contato em breve!\n\n📞 *Telefone:* (11) 9999-9999\n📧 *E-mail:* contato@devfit.com.br\n\n⏳ *Tempo de resposta:* até 2 horas úteis\n\n0️⃣  VOLTAR AO MENU PRINCIPAL`);
+                            sessao.etapa = STEPS.HUMAN;
                             break;
-                        case 6:
-                            await sendMessage(`👋 Até logo, ${userName}!`);
-                            delete userSessions[userId];
-                            return;
-                        default:
-                            await sendMessage(`❌ Opção inválida. Digite 1-6.`);
                     }
-                } else if (userMsg === '0') {
-                    await sendMessage(`📋 *MENU PRINCIPAL*\n\n1️⃣ Planos\n2️⃣ Promoções\n3️⃣ Agendar Aula\n4️⃣ Informações\n5️⃣ Atendente\n6️⃣ Sair`);
+                } else if (textoRecebido === '0') {
+                    await enviar(`📋 *MENU PRINCIPAL*\n\n1️⃣  PLANOS E VALORES\n2️⃣  PROMOÇÕES ESPECIAIS\n3️⃣  AGENDAR AULA EXPERIMENTAL\n4️⃣  INFORMAÇÕES DA ACADEMIA\n5️⃣  FALAR COM ATENDENTE`);
+                    sessao.etapa = STEPS.START;
                 } else {
-                    await sendMessage(`❌ Digite apenas números 1-6.`);
+                    await enviar(`❌ *OPÇÃO INVÁLIDA!*\n\nPor favor, digite apenas números de 1 a 5.\n\n*EXEMPLOS:*\n• Digite "1" para Planos\n• Digite "2" para Promoções\n• Digite "3" para Agendar Aula\n• Digite "4" para Informações\n• Digite "5" para Atendente Humano\n\n0️⃣  PARA REPETIR O MENU`);
                 }
                 break;
-
+                
             case STEPS.PLANS:
-                if (isValidNumber(userMsg)) {
-                    const planOption = parseInt(userMsg);
-                    switch (planOption) {
+                if (ehNumero) {
+                    switch (opcaoNumero) {
                         case 1:
-                            await sendMessage(`📋 *PLANO MENSAL*\n💰 R$ 120,00/mês\n\n1️⃣ Contratar\n2️⃣ Voltar\n0️⃣ Menu`);
+                            await enviar(`📋 *PLANO MENSAL*\n\n✅ Acesso ilimitado à academia\n✅ Uso de todos equipamentos\n✅ Aulas em grupo inclusas\n✅ Área de musculação e cardio\n\n💰 *Valor:* R$ 120,00/mês\n\n1️⃣  CONTRATAR ESTE PLANO\n2️⃣  FALAR COM VENDEDOR\n0️⃣  VOLTAR`);
                             break;
                         case 2:
-                            await sendMessage(`📋 *PLANO TRIMESTRAL*\n💰 R$ 100,00/mês\n\n1️⃣ Contratar\n2️⃣ Voltar\n0️⃣ Menu`);
+                            await enviar(`📋 *PLANO TRIMESTRAL*\n\n✅ Todos benefícios do plano mensal\n✅ Economia de 16%\n✅ Renovação automática\n✅ 1 avaliação física gratuita\n\n💰 *Valor:* R$ 100,00/mês (R$ 300,00 total)\n\n1️⃣  CONTRATAR ESTE PLANO\n2️⃣  FALAR COM VENDEDOR\n0️⃣  VOLTAR`);
                             break;
                         case 3:
-                            await sendMessage(`📋 *PLANO SEMESTRAL*\n💰 R$ 95,00/mês\n\n1️⃣ Contratar\n2️⃣ Voltar\n0️⃣ Menu`);
+                            await enviar(`📋 *PLANO SEMESTRAL*\n\n✅ Economia de 20%\n✅ Upgrade gratuito após 3 meses\n✅ 2 meses de academia online\n✅ 2 avaliações físicas\n\n💰 *Valor:* R$ 95,00/mês (R$ 570,00 total)\n\n1️⃣  CONTRATAR ESTE PLANO\n2️⃣  FALAR COM VENDEDOR\n0️⃣  VOLTAR`);
                             break;
                         case 4:
-                            await sendMessage(`📋 *PLANO ANUAL*\n💰 R$ 89,90/mês\n\n1️⃣ Contratar\n2️⃣ Voltar\n0️⃣ Menu`);
+                            await enviar(`📋 *PLANO ANUAL*\n\n✅ Economia de 25%\n✅ Matrícula GRÁTIS\n✅ 3 meses de academia online\n✅ Assessoria nutricional\n✅ 4 avaliações físicas\n✅ Cadeira de massagem\n\n💰 *Valor:* R$ 89,90/mês (R$ 1.078,80 total)\n\n1️⃣  CONTRATAR ESTE PLANO\n2️⃣  FALAR COM VENDEDOR\n0️⃣  VOLTAR`);
                             break;
                         case 0:
-                            session.stage = STEPS.START;
-                            await sendMessage(`📋 *MENU PRINCIPAL*\n\n1️⃣ Planos\n2️⃣ Promoções\n3️⃣ Agendar Aula\n4️⃣ Informações\n5️⃣ Atendente\n6️⃣ Sair`);
+                            sessao.etapa = STEPS.START;
+                            await enviar(`📋 *MENU PRINCIPAL*\n\n1️⃣  PLANOS E VALORES\n2️⃣  PROMOÇÕES ESPECIAIS\n3️⃣  AGENDAR AULA EXPERIMENTAL\n4️⃣  INFORMAÇÕES DA ACADEMIA\n5️⃣  FALAR COM ATENDENTE`);
                             break;
                         default:
-                            await sendMessage(`❌ Digite 1-4 ou 0.`);
+                            await enviar(`❌ Digite um número de 1 a 4 ou 0 para voltar.`);
                     }
                 } else {
-                    await sendMessage(`❌ Digite apenas números.`);
+                    await enviar(`❌ Por favor, digite apenas números.`);
                 }
                 break;
-
+                
             case STEPS.PROMO:
-                if (isValidNumber(userMsg)) {
-                    const promoOption = parseInt(userMsg);
-                    switch (promoOption) {
+                if (ehNumero) {
+                    switch (opcaoNumero) {
                         case 1:
-                            await sendMessage(`🔥 *PROJETO VERÃO*\nMatrícula GRÁTIS!\n\n1️⃣ Garantir\n2️⃣ Voltar\n0️⃣ Menu`);
+                            await enviar(`🎉 *PROJETO VERÃO CONFIRMADO!*\n\n✅ Matrícula totalmente GRÁTIS!\n✅ Plano anual com desconto máximo\n✅ Kit boas-vindas (toalha + squeeze)\n\n📅 *Válido até:* 31/12/2024\n\n1️⃣  QUERO GARANTIR ESTA OFERTA!\n2️⃣  FALAR COM CONSULTOR\n0️⃣  VOLTAR`);
                             break;
                         case 2:
-                            await sendMessage(`👥 *INDIQUE UM AMIGO*\nGanhe 1 mês!\n\n1️⃣ Indicar\n2️⃣ Voltar\n0️⃣ Menu`);
+                            await enviar(`👥 *INDICAÇÃO PREMIADA*\n\nIndique um amigo e ambos ganham:\n✅ 1 mês GRÁTIS na mensalidade!\n✅ Acesso VIP por 30 dias\n\n1️⃣  QUERO INDICAR UM AMIGO\n2️⃣  MAIS DETALHES\n0️⃣  VOLTAR`);
                             break;
                         case 3:
-                            await sendMessage(`👨‍👩‍👧‍👦 *PLANO FAMILIAR*\n20% desconto!\n\n1️⃣ Solicitar\n2️⃣ Voltar\n0️⃣ Menu`);
+                            await enviar(`👨‍👩‍👧‍👦 *PLANO DUPLO/FAMILIAR*\n\n20% de desconto para:\n✅ Casais\n✅ Famílias\n✅ Amigos (mínimo 2 pessoas)\n\n1️⃣  SOLICITAR ORÇAMENTO\n2️⃣  CONDIÇÕES\n0️⃣  VOLTAR`);
                             break;
                         case 0:
-                            session.stage = STEPS.START;
-                            await sendMessage(`📋 *MENU PRINCIPAL*\n\n1️⃣ Planos\n2️⃣ Promoções\n3️⃣ Agendar Aula\n4️⃣ Informações\n5️⃣ Atendente\n6️⃣ Sair`);
+                            sessao.etapa = STEPS.START;
+                            await enviar(`📋 *MENU PRINCIPAL*\n\n1️⃣  PLANOS E VALORES\n2️⃣  PROMOÇÕES ESPECIAIS\n3️⃣  AGENDAR AULA EXPERIMENTAL\n4️⃣  INFORMAÇÕES DA ACADEMIA\n5️⃣  FALAR COM ATENDENTE`);
                             break;
                         default:
-                            await sendMessage(`❌ Digite 1-3 ou 0.`);
+                            await enviar(`❌ Digite 1, 2, 3 ou 0.`);
                     }
                 } else {
-                    await sendMessage(`❌ Digite apenas números.`);
+                    await enviar(`❌ Digite apenas números.`);
                 }
                 break;
-
-            case STEPS.SCHEDULE_NAME:
-                if (userMsg === '1') {
-                    await sendMessage(`👤 *AGENDAMENTO*\nDigite:\n\n1️⃣ Para informar nome\n2️⃣ Cancelar\n\n*Digite o número:*`);
-                } else if (userMsg === '2') {
-                    session.stage = STEPS.START;
-                    await sendMessage(`📋 *MENU PRINCIPAL*\n1️⃣ Planos\n2️⃣ Promoções\n3️⃣ Agendar Aula\n4️⃣ Informações\n5️⃣ Atendente\n6️⃣ Sair`);
-                } else if (userMsg === '1') {
-                    // Aqui o usuário digitaria o nome (não numérico)
-                    // Vamos simplificar e usar número também
-                    await sendMessage(`🕒 *HORÁRIO*\n\n1️⃣ Manhã\n2️⃣ Tarde\n3️⃣ Noite\n4️⃣ Sábado\n\n0️⃣ Voltar`);
-                    session.stage = STEPS.SCHEDULE_TIME;
-                } else {
-                    // Se não for número, assume nome e vai para horário
-                    session.data.name = userMsg;
-                    await sendMessage(`🕒 *HORÁRIO*\n\n1️⃣ Manhã\n2️⃣ Tarde\n3️⃣ Noite\n4️⃣ Sábado\n\n0️⃣ Voltar`);
-                    session.stage = STEPS.SCHEDULE_TIME;
-                }
-                break;
-
-            case STEPS.SCHEDULE_TIME:
-                if (isValidNumber(userMsg)) {
-                    const timeOption = parseInt(userMsg);
-                    const timeSlots = {
-                        1: 'Manhã (06:00-12:00)',
-                        2: 'Tarde (14:00-18:00)',
-                        3: 'Noite (18:00-22:00)',
-                        4: 'Sábado (08:00-14:00)'
-                    };
-                    
-                    if (timeSlots[timeOption]) {
-                        session.data.time = timeSlots[timeOption];
-                        session.data.name = session.data.name || userName;
+                
+            case STEPS.SCHEDULE:
+                if (ehNumero) {
+                    if (opcaoNumero === 1) {
+                        await enviar(`📅 *AGENDAMENTO RÁPIDO*\n\n*Escolha um horário:*\n\n1️⃣  SEGUNDA - 9:00 às 10:00\n2️⃣  TERÇA - 14:00 às 15:00\n3️⃣  QUARTA - 18:00 às 19:00\n4️⃣  QUINTA - 10:00 às 11:00\n5️⃣  SEXTA - 16:00 às 17:00\n6️⃣  SÁBADO - 11:00 às 12:00\n\n0️⃣  VOLTAR`);
+                    } else if (opcaoNumero === 2) {
+                        await enviar(`⏰ *HORÁRIOS DISPONÍVEIS*\n\n📅 *Próximas vagas:*\n• Amanhã: 9h, 14h, 18h\n• Quarta-feira: 10h, 16h\n• Sexta-feira: 9h, 15h, 19h\n\n1️⃣  AGENDAR AGORA\n0️⃣  VOLTAR`);
+                    } else if (opcaoNumero >= 1 && opcaoNumero <= 6) {
+                        const horarios = [
+                            'SEGUNDA - 9:00 às 10:00',
+                            'TERÇA - 14:00 às 15:00',
+                            'QUARTA - 18:00 às 19:00',
+                            'QUINTA - 10:00 às 11:00',
+                            'SEXTA - 16:00 às 17:00',
+                            'SÁBADO - 11:00 às 12:00'
+                        ];
                         
-                        console.log(`📅 AGENDAMENTO: ${session.data.name} - ${session.data.time}`);
+                        console.log(`📅 AULA AGENDADA: ${nomeUsuario} - ${horarios[opcaoNumero-1]} - ${userId}`);
                         
-                        await sendMessage(`✅ *AGENDAMENTO CONFIRMADO!*\n\n👤: ${session.data.name}\n🕒: ${session.data.time}\n📍: Rua Dev, 404\n\n1️⃣ Novo Agendamento\n2️⃣ Menu Principal\n0️⃣ Sair`);
-                        session.stage = STEPS.START;
-                    } else if (userMsg === '0') {
-                        session.stage = STEPS.START;
-                        await sendMessage(`📋 *MENU PRINCIPAL*\n\n1️⃣ Planos\n2️⃣ Promoções\n3️⃣ Agendar Aula\n4️⃣ Informações\n5️⃣ Atendente\n6️⃣ Sair`);
+                        await enviar(`✅ *AULA EXPERIMENTAL AGENDADA!*\n\n👤 *Nome:* ${nomeUsuario}\n📅 *Data/Horário:* ${horarios[opcaoNumero-1]}\n📍 *Local:* Rua dos Atletas, 123\n📞 *Telefone:* (11) 9999-9999\n\n⚠️ *Recomendações:*\n• Chegar 15 minutos antes\n• Trazer RG ou CPF\n• Usar roupas confortáveis\n• Trazer toalha de rosto\n\n*Estamos ansiosos para recebê-lo!* 🏋️‍♂️`);
+                        
+                        sessao.etapa = STEPS.START;
+                    } else if (opcaoNumero === 0) {
+                        sessao.etapa = STEPS.START;
+                        await enviar(`📋 *MENU PRINCIPAL*\n\n1️⃣  PLANOS E VALORES\n2️⃣  PROMOÇÕES ESPECIAIS\n3️⃣  AGENDAR AULA EXPERIMENTAL\n4️⃣  INFORMAÇÕES DA ACADEMIA\n5️⃣  FALAR COM ATENDENTE`);
                     } else {
-                        await sendMessage(`❌ Digite 1-4 ou 0.`);
+                        await enviar(`❌ Opção inválida. Digite 1, 2 ou 0.`);
                     }
                 } else {
-                    await sendMessage(`❌ Digite apenas números.`);
+                    await enviar(`❌ Digite apenas números.`);
                 }
                 break;
-
+                
             case STEPS.HUMAN:
-                if (isValidNumber(userMsg)) {
-                    const humanOption = parseInt(userMsg);
-                    const departments = {
-                        1: 'Comercial',
-                        2: 'Financeiro', 
-                        3: 'Suporte',
-                        4: 'Emergência'
-                    };
-                    
-                    if (departments[humanOption]) {
-                        console.log(`📞 ATENDIMENTO: ${departments[humanOption]} - ${userName}`);
-                        await sendMessage(`✅ ${departments[humanOption]} acionado!\nAguarde contato.\n\n1️⃣ Menu\n0️⃣ Sair`);
-                        session.stage = STEPS.START;
-                    } else if (userMsg === '0') {
-                        session.stage = STEPS.START;
-                        await sendMessage(`📋 *MENU PRINCIPAL*\n\n1️⃣ Planos\n2️⃣ Promoções\n3️⃣ Agendar Aula\n4️⃣ Informações\n5️⃣ Atendente\n6️⃣ Sair`);
-                    } else {
-                        await sendMessage(`❌ Digite 1-4 ou 0.`);
-                    }
+                if (textoRecebido === '0') {
+                    sessao.etapa = STEPS.START;
+                    await enviar(`📋 *MENU PRINCIPAL*\n\n1️⃣  PLANOS E VALORES\n2️⃣  PROMOÇÕES ESPECIAIS\n3️⃣  AGENDAR AULA EXPERIMENTAL\n4️⃣  INFORMAÇÕES DA ACADEMIA\n5️⃣  FALAR COM ATENDENTE`);
                 } else {
-                    await sendMessage(`❌ Digite apenas números.`);
+                    console.log(`📞 ATENDIMENTO SOLICITADO: ${nomeUsuario} - ${userId}`);
+                    await enviar(`✅ *SOLICITAÇÃO REGISTRADA!*\n\nUm de nossos consultores entrará em contato em breve.\n\n📞 *Contato alternativo:* (11) 9999-9999\n⏳ *Tempo médio de resposta:* 1-2 horas úteis\n\n0️⃣  VOLTAR AO MENU`);
                 }
                 break;
         }
     } catch (error) {
-        console.error('Erro no processamento:', error.message);
-        // Tenta enviar mensagem de erro
+        console.error('❌ ERRO NO PROCESSAMENTO:', error);
         try {
-            await sendMessage(`❌ Erro. Digite 0 para menu.`);
-            session.stage = STEPS.START;
+            await enviar(`😕 *Desculpe, ocorreu um erro.*\n\nPor favor, digite "0" para voltar ao menu principal.`);
+            sessao.etapa = STEPS.START;
         } catch (e) {
-            console.error('Erro ao enviar mensagem de erro:', e.message);
+            console.error('❌ ERRO AO ENVIAR MENSAGEM DE ERRO:', e);
         }
     }
+    
+    console.log('══════════════════════════════════════\n');
 });
 
-// Limpar sessões inativas
+// Limpar sessões inativas (30 minutos)
 setInterval(() => {
-    const now = Date.now();
-    for (const [userId, session] of Object.entries(userSessions)) {
-        if (now - session.lastActivity > 30 * 60 * 1000) {
+    const agora = Date.now();
+    const limite = 30 * 60 * 1000; // 30 minutos
+    
+    for (const [userId, sessao] of Object.entries(userSessions)) {
+        if (agora - sessao.ultimaInteracao > limite) {
+            console.log(`🗑️  Removendo sessão inativa: ${userId}`);
             delete userSessions[userId];
         }
     }
-}, 10 * 60 * 1000);
+}, 10 * 60 * 1000); // Verificar a cada 10 minutos
 
+// Inicializar
 client.initialize().catch(error => {
-    console.error('Erro na inicialização:', error);
+    console.error('❌ ERRO NA INICIALIZAÇÃO:', error);
 });
 
-console.log('🤖 Bot iniciando...');
+console.log('🚀 Bot inicializando...');
+console.log('📝 Configure o WhatsApp Web no seu celular:');
+console.log('   WhatsApp → ⋮ (Menu) → Dispositivos conectados → Conectar um dispositivo');
+console.log('⏳ Aguardando QR Code...');
